@@ -13,68 +13,40 @@
 
 #pragma comment(lib, "comctl32.lib")
 
-// Идентификаторы элементов управления (Control IDs)
+// Идентификаторы элементов интерфейса
 #define IDC_COMBO_PORT      101
-#define IDC_COMBO_BYTESIZE  102
+#define IDC_COMBO_STOPBITS  102
 #define IDC_EDIT_INPUT      103
 #define IDC_EDIT_OUTPUT     104
 #define IDC_STATIC_STATUS   105
-#define IDT_STATUS_TIMER    201
 
-// Глобальные дескрипторы и переменные состояния
-HWND hComboPort     = NULL;
-HWND hComboByteSize = NULL;
-HWND hEditInput     = NULL;
-HWND hEditOutput    = NULL;
-HWND hStaticStatus  = NULL;
+// Таймеры
+#define IDT_STATUS_TIMER    201
+#define IDT_CLEAR_INPUT     203 // Таймер задержки стирания (500 мс)
+
+// Дескрипторы окон и элементы состояния
+HWND hComboPort = NULL;
+HWND hComboStopBits = NULL;
+HWND hEditInput = NULL;
+HWND hEditOutput = NULL;
+HWND hStaticStatus = NULL;
 WNDPROC origEditProc = NULL;
 
 HANDLE hSerial = INVALID_HANDLE_VALUE;
 HANDLE hReadThread = NULL;
 std::atomic<bool> g_bRunning(false);
-std::atomic<unsigned long long> g_txCount(0); // Счётчик переданных символов
+std::atomic<unsigned long long> g_txCount(0);
+bool g_portLocked = false;
 
 // Прототипы функций
-bool OpenAndConfigureSerial(int portNumber, BYTE byteSize);
+bool OpenAndConfigureSerial(int portNumber, BYTE stopBits);
 void CloseSerial();
 DWORD WINAPI SerialReadThread(LPVOID lpParam);
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-void SendCurrentLine();
 void AppendTextToOutput(const char* data, DWORD len);
+BYTE GetSelectedStopBits();
 
-/*
-================================================================================
- СТРУКТУРА DCB И ВСЕ ПАРАМЕТРЫ ИНИЦИАЛИЗАЦИИ СОМ-ПОРТА (UART 16550):
- 
- 1. DCBlength: размер структуры в байтах sizeof(DCB).
- 2. BaudRate (Скорость передачи):
-    Возможные значения Win32: CBR_110, CBR_300, CBR_600, CBR_1200, CBR_2400,
-    CBR_4800, CBR_9600, CBR_14400, CBR_19200, CBR_38400, CBR_57600, CBR_115200,
-    CBR_128000, CBR_256000. В UART 16550 задаётся делителем базовой частоты.
- 3. ByteSize (Длина информационного слова / байта) — ВАРИАНТ 2:
-    Возможные значения по стандарту UART 16550 / Win32: 5, 6, 7, 8 бит.
- 4. Parity (Контроль четности):
-    - NOPARITY (0)   : без бита четности;
-    - ODDPARITY (1)  : нечетность (сумма единиц нечетна);
-    - EVENPARITY (2) : четность (сумма единиц четна);
-    - MARKPARITY (3) : бит четности всегда 1;
-    - SPACEPARITY (4): бит четности всегда 0.
- 5. StopBits (Количество стоп-битов):
-    - ONESTOPBIT (0)   : 1 стоп-бит;
-    - ONE5STOPBITS (1) : 1.5 стоп-бита (для 5-битных данных);
-    - TWOSTOPBITS (2)  : 2 стоп-бита.
- 6. Флаги управления потоком (Flow Control) и протоколом:
-    - fBinary: двоичный режим (для Win32 всегда TRUE);
-    - fParity: включение проверки четности (TRUE/FALSE);
-    - fOutxCtsFlow / fOutxDsrFlow: аппаратный контроль CTS/DSR;
-    - fDtrControl: DTR_CONTROL_DISABLE, DTR_CONTROL_ENABLE, DTR_CONTROL_HANDSHAKE;
-    - fRtsControl: RTS_CONTROL_DISABLE, RTS_CONTROL_ENABLE, RTS_CONTROL_HANDSHAKE, RTS_CONTROL_TOGGLE;
-    - fOutX / fInX: программный контроль XON/XOFF;
-    - XonChar / XoffChar: символы паузы/возобновления (обычно 0x11 и 0x13).
-================================================================================
-*/
-
-bool OpenAndConfigureSerial(int portNumber, BYTE byteSize) {
+bool OpenAndConfigureSerial(int portNumber, BYTE stopBits) {
     CloseSerial();
 
     std::wstring portName = L"\\\\.\\COM" + std::to_wstring(portNumber);
@@ -82,55 +54,61 @@ bool OpenAndConfigureSerial(int portNumber, BYTE byteSize) {
         portName.c_str(),
         GENERIC_READ | GENERIC_WRITE,
         0,              // Эксклюзивный доступ
-        NULL,           // Безопасность по умолчанию
-        OPEN_EXISTING,  // Только существующий порт
-        0,              // Блокирующий ввод/вывод (без OVERLAPPED)
+        NULL,
+        OPEN_EXISTING,
+        0,
         NULL
     );
 
     if (hSerial == INVALID_HANDLE_VALUE) {
-        MessageBoxW(NULL, L"Ошибка открытия СОМ-порта!", L"Ошибка", MB_ICONERROR | MB_OK);
+        DWORD err = GetLastError();
+        std::wstring msg = L"Не удалось открыть " + portName + L"\n";
+        if (err == ERROR_FILE_NOT_FOUND) {
+            msg += L"Причина: Порт отсутствует в системе.";
+        }
+        else if (err == ERROR_ACCESS_DENIED) {
+            msg += L"Причина: Порт уже занят другой программой.";
+        }
+        else {
+            msg += L"Код ошибки: " + std::to_wstring(err);
+        }
+        MessageBoxW(NULL, msg.c_str(), L"Ошибка подключения", MB_ICONWARNING | MB_OK);
         return false;
     }
 
-    // Настройка аппаратных буферов драйвера
     SetupComm(hSerial, 4096, 4096);
 
     DCB dcb = { 0 };
     dcb.DCBlength = sizeof(DCB);
     if (!GetCommState(hSerial, &dcb)) {
         CloseSerial();
-        MessageBoxW(NULL, L"Не удалось получить состояние порта!", L"Ошибка", MB_ICONERROR | MB_OK);
+        MessageBoxW(NULL, L"Не удалось получить параметры DCB!", L"Ошибка", MB_ICONERROR | MB_OK);
         return false;
     }
 
-    // Фиксированные параметры согласно заданию:
+    // Фиксированные параметры UART 16550
     dcb.BaudRate = CBR_9600;
-    dcb.StopBits = ONESTOPBIT;
-    dcb.Parity   = NOPARITY;
+    dcb.ByteSize = 8;
+    dcb.Parity = NOPARITY;
+    dcb.StopBits = stopBits;
 
-    // Изменяемый параметр (Вариант 2):
-    dcb.ByteSize = byteSize; // 5, 6, 7 или 8 бит
-
-    // Режим работы UART
+    // Режим работы контроллера UART
     dcb.fBinary = TRUE;
     dcb.fParity = FALSE;
     dcb.fOutxCtsFlow = FALSE;
     dcb.fOutxDsrFlow = FALSE;
     dcb.fDtrControl = DTR_CONTROL_ENABLE;
-    dcb.fDsrSensitivity = FALSE;
+    dcb.fRtsControl = RTS_CONTROL_ENABLE;
     dcb.fOutX = FALSE;
     dcb.fInX = FALSE;
-    dcb.fRtsControl = RTS_CONTROL_ENABLE;
     dcb.fAbortOnError = FALSE;
 
     if (!SetCommState(hSerial, &dcb)) {
         CloseSerial();
-        MessageBoxW(NULL, L"Не удалось установить параметры порта (SetCommState)!", L"Ошибка", MB_ICONERROR | MB_OK);
+        MessageBoxW(NULL, L"Ошибка SetCommState!", L"Ошибка", MB_ICONERROR | MB_OK);
         return false;
     }
 
-    // Настройка таймаутов (минимальная задержка чтения для мгновенного отображения)
     COMMTIMEOUTS timeouts = { 0 };
     timeouts.ReadIntervalTimeout = MAXDWORD;
     timeouts.ReadTotalTimeoutMultiplier = 0;
@@ -141,9 +119,13 @@ bool OpenAndConfigureSerial(int portNumber, BYTE byteSize) {
 
     PurgeComm(hSerial, PURGE_TXCLEAR | PURGE_RXCLEAR);
 
-    // Запуск фонового потока циклического приема данных
     g_bRunning = true;
     hReadThread = CreateThread(NULL, 0, SerialReadThread, NULL, 0, NULL);
+
+    if (!g_portLocked) {
+        g_portLocked = true;
+        EnableWindow(hComboPort, FALSE);
+    }
 
     return true;
 }
@@ -161,7 +143,6 @@ void CloseSerial() {
     }
 }
 
-// Поток непрерывного приема данных
 DWORD WINAPI SerialReadThread(LPVOID lpParam) {
     char buf[128];
     DWORD bytesRead = 0;
@@ -176,14 +157,14 @@ DWORD WINAPI SerialReadThread(LPVOID lpParam) {
         if (success && bytesRead > 0) {
             buf[bytesRead] = '\0';
             AppendTextToOutput(buf, bytesRead);
-        } else {
+        }
+        else {
             Sleep(10);
         }
     }
     return 0;
 }
 
-// Отображение принятых символов в окне вывода
 void AppendTextToOutput(const char* data, DWORD len) {
     int wlen = MultiByteToWideChar(CP_ACP, 0, data, len, NULL, 0);
     if (wlen <= 0) return;
@@ -195,122 +176,106 @@ void AppendTextToOutput(const char* data, DWORD len) {
     SendMessageW(hEditOutput, EM_REPLACESEL, FALSE, (LPARAM)wstr.c_str());
 }
 
-// Отправка введенной строки построчно по Enter (сырой посимвольный поток)
-void SendCurrentLine() {
-    if (hSerial == INVALID_HANDLE_VALUE) {
-        MessageBoxW(NULL, L"СОМ-порт не открыт!", L"Предупреждение", MB_ICONWARNING | MB_OK);
-        return;
-    }
-
-    int len = GetWindowTextLengthW(hEditInput);
-    std::wstring wbuffer(len + 1, 0);
-    GetWindowTextW(hEditInput, &wbuffer[0], len + 1);
-    wbuffer.resize(len);
-
-    // Очищаем окно ввода сразу после отправки
-    SetWindowTextW(hEditInput, L"");
-
-    // Добавляем перевод строки
-    wbuffer += L"\r\n";
-
-    // Преобразуем в сырые байты (ANSI)
-    int byteCount = WideCharToMultiByte(CP_ACP, 0, wbuffer.c_str(), -1, NULL, 0, NULL, NULL);
-    std::vector<char> rawData(byteCount);
-    WideCharToMultiByte(CP_ACP, 0, wbuffer.c_str(), -1, rawData.data(), byteCount, NULL, NULL);
-
-    // Передача данных посимвольно в соответствии с п.8 задания
-    for (size_t i = 0; i < rawData.size() - 1; ++i) {
-        char ch = rawData[i];
-        DWORD bytesWritten = 0;
-        if (WriteFile(hSerial, &ch, 1, &bytesWritten, NULL) && bytesWritten == 1) {
-            g_txCount++;
-        }
-    }
-}
-
-// Перехват клавиши Enter в поле ввода сообщений
+// Перехват клавиш: отправка сразу, показ символа и запуск таймера на стирание через 500 мс
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    if (uMsg == WM_KEYDOWN && wParam == VK_RETURN) {
-        SendCurrentLine();
-        return 0;
+    if (uMsg == WM_CHAR) {
+        wchar_t wch = (wchar_t)wParam;
+
+        if (hSerial != INVALID_HANDLE_VALUE) {
+            if (wch == VK_RETURN) {
+                char crlf[2] = { '\r', '\n' };
+                DWORD written = 0;
+                for (int i = 0; i < 2; ++i) {
+                    if (WriteFile(hSerial, &crlf[i], 1, &written, NULL) && written == 1) {
+                        g_txCount++;
+                    }
+                }
+                // Визуальная подсказка о переходе на новую строку
+                SetWindowTextW(hWnd, L"[Enter]");
+                SetTimer(GetParent(hWnd), IDT_CLEAR_INPUT, 500, NULL);
+                return 0;
+            }
+            else if (wch >= 32) {
+                char ch = 0;
+                if (WideCharToMultiByte(CP_ACP, 0, &wch, 1, &ch, 1, NULL, NULL) > 0) {
+                    DWORD written = 0;
+                    if (WriteFile(hSerial, &ch, 1, &written, NULL) && written == 1) {
+                        g_txCount++;
+                    }
+                }
+                // Показываем отправленный символ
+                std::wstring s(1, wch);
+                SetWindowTextW(hWnd, s.c_str());
+
+                // Запускаем задержку 500 мс до стирания
+                SetTimer(GetParent(hWnd), IDT_CLEAR_INPUT, 500, NULL);
+                return 0;
+            }
+        }
     }
     return CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
 }
 
-// Применение настроек из Окна управления (содержит ровно 2 элемента)
-void ApplyPortSettings() {
-    int portIdx = (int)SendMessageW(hComboPort, CB_GETCURSEL, 0, 0);
-    int sizeIdx = (int)SendMessageW(hComboByteSize, CB_GETCURSEL, 0, 0);
-
-    if (portIdx == CB_ERR || sizeIdx == CB_ERR) return;
-
-    int portNumber = portIdx + 1;       // Индекс 0 = COM1, 1 = COM2, 2 = COM3...
-    BYTE byteSize  = (BYTE)(5 + sizeIdx); // Индекс 0 = 5 бит, 1 = 6 бит, 2 = 7 бит, 3 = 8 бит
-
-    OpenAndConfigureSerial(portNumber, byteSize);
+BYTE GetSelectedStopBits() {
+    int idx = (int)SendMessageW(hComboStopBits, CB_GETCURSEL, 0, 0);
+    return (idx == 1) ? TWOSTOPBITS : ONESTOPBIT;
 }
 
-// Главная оконная процедура
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
-        // --- 1. ОКНО УПРАВЛЕНИЯ (GROUPBOX) ---
-        CreateWindowW(L"BUTTON", L"Окно управления (параметры)", 
-                      WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                      15, 10, 550, 80, hWnd, NULL, NULL, NULL);
+        // Окно управления (ровно 2 элемента)
+        CreateWindowW(L"BUTTON", L"Окно управления (параметры)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            15, 10, 550, 80, hWnd, NULL, NULL, NULL);
 
-        // Элемент 1 из 2: Выбор COM-порта
-        hComboPort = CreateWindowW(L"COMBOBOX", NULL, 
-                                   WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                   30, 40, 240, 200, hWnd, (HMENU)IDC_COMBO_PORT, NULL, NULL);
+        // 1. Выбор COM-порта
+        hComboPort = CreateWindowW(L"COMBOBOX", NULL,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            30, 40, 240, 250, hWnd, (HMENU)IDC_COMBO_PORT, NULL, NULL);
+        SendMessageW(hComboPort, CB_ADDSTRING, 0, (LPARAM)L"-- Выберите COM-порт --");
         for (int i = 1; i <= 16; ++i) {
             std::wstring name = L"СОМ-порт: COM" + std::to_wstring(i);
             SendMessageW(hComboPort, CB_ADDSTRING, 0, (LPARAM)name.c_str());
         }
-        SendMessageW(hComboPort, CB_SETCURSEL, 2, 0); // По умолчанию COM3
+        SendMessageW(hComboPort, CB_SETCURSEL, 0, 0);
 
-        // Элемент 2 из 2: Выбор длины байта (Вариант 2)
-        hComboByteSize = CreateWindowW(L"COMBOBOX", NULL, 
-                                       WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                       290, 40, 250, 200, hWnd, (HMENU)IDC_COMBO_BYTESIZE, NULL, NULL);
-        SendMessageW(hComboByteSize, CB_ADDSTRING, 0, (LPARAM)L"Длина байта: 5 бит");
-        SendMessageW(hComboByteSize, CB_ADDSTRING, 0, (LPARAM)L"Длина байта: 6 бит");
-        SendMessageW(hComboByteSize, CB_ADDSTRING, 0, (LPARAM)L"Длина байта: 7 бит");
-        SendMessageW(hComboByteSize, CB_ADDSTRING, 0, (LPARAM)L"Длина байта: 8 бит");
-        SendMessageW(hComboByteSize, CB_SETCURSEL, 3, 0); // По умолчанию 8 бит
+        // 2. Выбор стоп-битов (1 или 2 стоп-бита)
+        hComboStopBits = CreateWindowW(L"COMBOBOX", NULL,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            290, 40, 250, 200, hWnd, (HMENU)IDC_COMBO_STOPBITS, NULL, NULL);
+        SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"Стоп-биты: 1 стоп-бит");
+        SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"Стоп-биты: 2 стоп-бита");
+        SendMessageW(hComboStopBits, CB_SETCURSEL, 0, 0);
 
-        // --- 2. ОКНО ВВОДА СООБЩЕНИЙ ---
-        CreateWindowW(L"STATIC", L"Окно ввода сообщений (отправка по нажатию Enter):", 
-                      WS_CHILD | WS_VISIBLE, 15, 105, 550, 18, hWnd, NULL, NULL, NULL);
+        // Окно ввода (с визуальным отображением и задержкой перед стиранием)
+        CreateWindowW(L"STATIC", L"Окно ввода:",
+            WS_CHILD | WS_VISIBLE, 15, 105, 550, 18, hWnd, NULL, NULL, NULL);
 
-        hEditInput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", 
-                                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                    15, 125, 550, 28, hWnd, (HMENU)IDC_EDIT_INPUT, NULL, NULL);
+        hEditInput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            15, 125, 550, 28, hWnd, (HMENU)IDC_EDIT_INPUT, NULL, NULL);
         origEditProc = (WNDPROC)SetWindowLongPtrW(hEditInput, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
-        // --- 3. ОКНО ВЫВОДА СООБЩЕНИЙ ---
-        CreateWindowW(L"STATIC", L"Окно вывода сообщений (прием данных):", 
-                      WS_CHILD | WS_VISIBLE, 15, 165, 550, 18, hWnd, NULL, NULL, NULL);
+        // Окно вывода
+        CreateWindowW(L"STATIC", L"Окно вывода сообщений (прием данных):",
+            WS_CHILD | WS_VISIBLE, 15, 165, 550, 18, hWnd, NULL, NULL, NULL);
 
-        hEditOutput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", 
-                                     WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | 
-                                     ES_READONLY | WS_VSCROLL,
-                                     15, 185, 550, 160, hWnd, (HMENU)IDC_EDIT_OUTPUT, NULL, NULL);
+        hEditOutput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
+            ES_READONLY | WS_VSCROLL,
+            15, 185, 550, 160, hWnd, (HMENU)IDC_EDIT_OUTPUT, NULL, NULL);
 
-        // --- 4. ОКНО СОСТОЯНИЯ ---
-        CreateWindowW(L"BUTTON", L"Окно состояния", 
-                      WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                      15, 360, 550, 60, hWnd, NULL, NULL, NULL);
+        // Окно состояния
+        CreateWindowW(L"BUTTON", L"Окно состояния",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            15, 360, 550, 60, hWnd, NULL, NULL, NULL);
 
-        hStaticStatus = CreateWindowW(L"STATIC", L"Количество переданных символов: 0", 
-                                     WS_CHILD | WS_VISIBLE,
-                                     30, 385, 500, 20, hWnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
+        hStaticStatus = CreateWindowW(L"STATIC", L"Выберите COM-порт в окне управления...",
+            WS_CHILD | WS_VISIBLE,
+            30, 385, 500, 20, hWnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
 
-        // Периодическое обновление окна состояния (каждые 300 мс)
         SetTimer(hWnd, IDT_STATUS_TIMER, 300, NULL);
-
-        // Первоначальное открытие порта с выбранными значениями
-        ApplyPortSettings();
         SetFocus(hEditInput);
         break;
     }
@@ -319,23 +284,49 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int wmId = LOWORD(wParam);
         int wmEvent = HIWORD(wParam);
 
-        // Реагируем на выбор в выпадающих списках окна управления
-        if ((wmId == IDC_COMBO_PORT || wmId == IDC_COMBO_BYTESIZE) && wmEvent == CBN_SELCHANGE) {
-            ApplyPortSettings();
-            SetFocus(hEditInput); // Возвращаем фокус на поле ввода
+        if (wmId == IDC_COMBO_PORT && wmEvent == CBN_SELCHANGE) {
+            int portIdx = (int)SendMessageW(hComboPort, CB_GETCURSEL, 0, 0);
+            if (portIdx > 0 && !g_portLocked) {
+                if (OpenAndConfigureSerial(portIdx, GetSelectedStopBits())) {
+                    std::wstring okMsg = L"COM" + std::to_wstring(portIdx) + L" открыт. Количество переданных символов: 0";
+                    SetWindowTextW(hStaticStatus, okMsg.c_str());
+                }
+                SetFocus(hEditInput);
+            }
+        }
+
+        if (wmId == IDC_COMBO_STOPBITS && wmEvent == CBN_SELCHANGE) {
+            if (hSerial != INVALID_HANDLE_VALUE) {
+                DCB dcb = { 0 };
+                dcb.DCBlength = sizeof(DCB);
+                if (GetCommState(hSerial, &dcb)) {
+                    dcb.StopBits = GetSelectedStopBits();
+                    SetCommState(hSerial, &dcb);
+                }
+            }
+            SetFocus(hEditInput);
         }
         break;
     }
 
     case WM_TIMER: {
-        if (wParam == IDT_STATUS_TIMER) {
-            std::wstring statusText = L"Количество переданных символов: " + std::to_wstring(g_txCount.load());
+        // Стирание поля ввода после истечения задержки
+        if (wParam == IDT_CLEAR_INPUT) {
+            KillTimer(hWnd, IDT_CLEAR_INPUT);
+            SetWindowTextW(hEditInput, L"");
+        }
+
+        // Обновление счетчика отправленных символов
+        if (wParam == IDT_STATUS_TIMER && hSerial != INVALID_HANDLE_VALUE) {
+            std::wstring statusText = L"Порт активен. Количество переданных символов: " +
+                std::to_wstring(g_txCount.load());
             SetWindowTextW(hStaticStatus, statusText.c_str());
         }
         break;
     }
 
     case WM_DESTROY:
+        KillTimer(hWnd, IDT_CLEAR_INPUT);
         KillTimer(hWnd, IDT_STATUS_TIMER);
         CloseSerial();
         PostQuitMessage(0);
@@ -353,20 +344,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     icex.dwICC = ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icex);
 
-    const wchar_t CLASS_NAME[] = L"OSKS_Lab1_Variant2_Class";
+    const wchar_t CLASS_NAME[] = L"OSKS_Lab1_Var3_Class";
 
     WNDCLASSW wc = { 0 };
-    wc.lpfnWndProc   = WndProc;
-    wc.hInstance     = hInstance;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
-    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
 
     RegisterClassW(&wc);
 
     HWND hWnd = CreateWindowExW(
-        0, CLASS_NAME, 
-        L"ОсКС. Лабораторная работа №1 — Вариант 2",
+        0, CLASS_NAME,
+        L"ОСКС. Лабораторная работа №1 — Вариант 3",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 595, 470,
         NULL, NULL, hInstance, NULL
