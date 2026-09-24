@@ -361,3 +361,13 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Настройки VS Code и локальный скрипт сборки
+.vscode/
+build.bat
+
+# Бинарные файлы и артефакты сборки в корне
+*.exe
+*.obj
+*.pdb
+*.ilk

@@ -23,6 +23,7 @@
 
 // Дескрипторы 4 отдельных окон
 HWND hWndControl = NULL;
+<<<<<<< HEAD
 HWND hWndStatus = NULL;
 HWND hWndInput = NULL;
 HWND hWndOutput = NULL;
@@ -33,6 +34,18 @@ HWND hComboStopBits = NULL;
 HWND hEditInput = NULL;
 HWND hEditOutput = NULL;
 HWND hStaticStatus = NULL;
+=======
+HWND hWndStatus  = NULL;
+HWND hWndInput   = NULL;
+HWND hWndOutput  = NULL;
+
+// Элементы управления
+HWND hComboPort     = NULL;
+HWND hComboStopBits = NULL;
+HWND hEditInput     = NULL;
+HWND hEditOutput    = NULL;
+HWND hStaticStatus  = NULL;
+>>>>>>> dc4fc0f793677a80a3ff38d50c55f462aa2204f9
 
 WNDPROC origEditProc = NULL;
 HANDLE hSerial = INVALID_HANDLE_VALUE;
@@ -385,12 +398,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         RegisterClassW(&wc);
+<<<<<<< HEAD
         };
 
     RegisterCustomClass(L"OSKS_Control_Class", WndProcControl);
     RegisterCustomClass(L"OSKS_Status_Class", WndProcStatus);
     RegisterCustomClass(L"OSKS_Input_Class", WndProcInput);
     RegisterCustomClass(L"OSKS_Output_Class", WndProcOutput);
+=======
+    };
+
+    RegisterCustomClass(L"OSKS_Control_Class", WndProcControl);
+    RegisterCustomClass(L"OSKS_Status_Class",  WndProcStatus);
+    RegisterCustomClass(L"OSKS_Input_Class",   WndProcInput);
+    RegisterCustomClass(L"OSKS_Output_Class",  WndProcOutput);
+>>>>>>> dc4fc0f793677a80a3ff38d50c55f462aa2204f9
 
     // Рассчитываем координаты сетки 2x2 по центру экрана
     int screenW = GetSystemMetrics(SM_CXSCREEN);
