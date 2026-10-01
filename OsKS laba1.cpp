@@ -259,10 +259,33 @@ BYTE GetSelectedStopBits() {
 // БЭКЕНД: Посимвольная отправка сырого потока при вводе (WM_CHAR)
 // ============================================================================
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    // 1. Блокируем клавиши Backspace и Delete на уровне нажатия клавиш
+    if (uMsg == WM_KEYDOWN) {
+        if (wParam == VK_BACK || wParam == VK_DELETE) {
+            return 0; // Игнорируем: стереть символы нельзя
+        }
+    }
+
+    // 2. Блокируем команды вырезания и очистки (Ctrl+X, пункт меню "Удалить" и т.д.)
+    if (uMsg == WM_CUT || uMsg == WM_CLEAR) {
+        return 0; // Запрещаем удаление через буфер обмена
+    }
+
+    // 3. Обработка ввода печатных символов и Enter
     if (uMsg == WM_CHAR) {
         wchar_t wch = (wchar_t)wParam;
 
+        // Блокируем управляющий символ забоя (Backspace ASCII 8)
+        if (wch == VK_BACK) {
+            return 0;
+        }
+
         if (hSerial != INVALID_HANDLE_VALUE) {
+            // Защита от затирания: если был выделен текст, снимаем выделение 
+            // и переносим каретку строго в конец текста перед вводом нового символа
+            int textLen = GetWindowTextLengthW(hWnd);
+            SendMessageW(hWnd, EM_SETSEL, (WPARAM)textLen, (LPARAM)textLen);
+
             if (wch == VK_RETURN) {
                 char crlf[2] = { '\r', '\n' };
                 DWORD written = 0;
@@ -284,7 +307,12 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 return CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
             }
         }
+        else {
+            // Если порт ещё не открыт, не даём печатать впустую
+            return 0;
+        }
     }
+
     return CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
 }
 
