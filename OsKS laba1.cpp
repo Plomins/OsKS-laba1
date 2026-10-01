@@ -351,7 +351,7 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             0, 0, 0, 0, hWnd, (HMENU)IDC_COMBO_STOPBITS, NULL, NULL);
         SendMessageW(hComboStopBits, WM_SETFONT, (WPARAM)hFont, TRUE);
-        SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"-- Выберите стоп-биты --");
+        SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"-- Выберите количество стоп-битов --");
         SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"Стоп-биты: 1 стоп-бит");
         SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"Стоп-биты: 2 стоп-бита");
         SendMessageW(hComboStopBits, CB_SETCURSEL, 0, 0);
@@ -471,7 +471,7 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_TIMER:
         if (wParam == IDT_STATUS_TIMER && hSerial != INVALID_HANDLE_VALUE) {
-            std::wstring statusText = L"Порт активен. Количество переданных символов: " +
+            std::wstring statusText = L"Количество переданных символов: " +
                 std::to_wstring(g_txCount.load());
             SetWindowTextW(hStaticStatus, statusText.c_str());
         }
