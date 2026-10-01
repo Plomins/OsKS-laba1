@@ -371,3 +371,4 @@ build.bat
 *.obj
 *.pdb
 *.ilk
+*.manifest
