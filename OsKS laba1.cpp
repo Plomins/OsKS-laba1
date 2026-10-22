@@ -274,8 +274,6 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         }
 
         if (hSerial != INVALID_HANDLE_VALUE) {
-            // Защита от затирания: если был выделен текст, снимаем выделение 
-            // и переносим каретку строго в конец текста перед вводом нового символа
             int textLen = GetWindowTextLengthW(hWnd);
             SendMessageW(hWnd, EM_SETSEL, (WPARAM)textLen, (LPARAM)textLen);
 
@@ -445,8 +443,7 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     }
 
                     if (OpenAndConfigureSerial(portNumber, stopBits)) {
-                        std::wstring okMsg = L"COM" + std::to_wstring(portNumber) + L" открыт. Количество переданных символов: 0";
-                        SetWindowTextW(hStaticStatus, okMsg.c_str());
+                        SetWindowTextW(hStaticStatus, L" Количество переданных символов: 0");
                     }
                     SetFocus(hEditInput);
                 }
@@ -493,7 +490,6 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-// Точка входа WinMain
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
