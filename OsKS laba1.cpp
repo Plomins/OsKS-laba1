@@ -1,4 +1,4 @@
-﻿#ifndef NOMINMAX
+#ifndef NOMINMAX
 #define NOMINMAX
 #endif
 
@@ -22,66 +22,91 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "advapi32.lib")
 
-// Подключение современных визуальных стилей Windows
-#pragma comment(linker, "\"/manifestdependency:type='win32' \
-name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
-processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-// Идентификаторы элементов управления
+// Идентификаторы элементов интерфейса
 #define IDC_COMBO_PORT      101
 #define IDC_COMBO_STOPBITS  102
-#define IDC_RICH_STATUS     103
-#define IDC_EDIT_INPUT      104
-#define IDC_EDIT_OUTPUT     105
+#define IDC_STATIC_STATUS   103
+#define IDC_RICH_STATUS     104
+#define IDC_EDIT_INPUT      105
+#define IDC_EDIT_OUTPUT     106
 
-// Параметры кадра для Варианта 3
-#define MAX_FRAME_SIZE      300         // Максимальная длина кадра по ТЗ (300 байтов)
-#define FRAME_FLAG_STR      "45050103"  // 8 байтов: 45050 + 1 + 0 + 3
+#define IDT_STATUS_TIMER    201
+
+// ============================================================================
+// ПАРАМЕТРЫ СТРУКТУРЫ КАДРА (СТРОГО 3 ФЛАГА С УЧЁТОМ СТАРТОВОГО)
+// ============================================================================
+#define MAX_FRAME_SIZE      300         // Максимальный размер кадра (Вариант 3)[cite: 1]
+#define FRAME_FLAG_STR      "450501-3"  // ФЛАГ 1: Начальный флаг кадра (8 байт)[cite: 1, 2]
 #define FRAME_FLAG_LEN      8
-#define RESERVED_BYTES_LEN  10          // 10 зарезервированных байтов в конце кадра
-#define SERVICE_FIELDS_LEN  4           // SrcAddr(1) + DestAddr(1) + Type(1) + FCS(1)
+#define RESERVED_BYTES_LEN  10          // 10 зарезервированных байтов в конце кадра[cite: 1]
+#define SERVICE_FLAGS_LEN   2           // Флаг 2 (Addr: 1 байт) + Флаг 3 (Type: 1 байт)
 
-// Максимальный объем полезных данных в одном кадре
-#define MAX_PAYLOAD_SIZE    (MAX_FRAME_SIZE - FRAME_FLAG_LEN - SERVICE_FIELDS_LEN - 2 - RESERVED_BYTES_LEN)
+// Максимальный объем полезных данных: 300 - 8 - 2 - 2(длина) - 1(FCS) - 10(резерв) = 277 байт
+#define MAX_PAYLOAD_SIZE    (MAX_FRAME_SIZE - FRAME_FLAG_LEN - SERVICE_FLAGS_LEN - 2 - 1 - RESERVED_BYTES_LEN)
 
-// Дескрипторы окон и рамок-групп (Сетка 2х2)
-HWND hWndMain      = NULL;
+// Лимит полезных данных для автоотправки: 277 полезных байт = ровно 300 байт кадра в канале
+#define AUTO_SEND_LIMIT     MAX_PAYLOAD_SIZE 
+
+// Дескрипторы окон интерфейса (сетка 2х2)
+HWND hWndMain = NULL;
 HWND hGroupControl = NULL;
-HWND hGroupStatus  = NULL;
-HWND hGroupInput   = NULL;
-HWND hGroupOutput  = NULL;
+HWND hGroupStatus = NULL;
+HWND hGroupInput = NULL;
+HWND hGroupOutput = NULL;
 
-// Дескрипторы элементов интерфейса
-HWND hComboPort     = NULL;
+HWND hComboPort = NULL;
 HWND hComboStopBits = NULL;
-HWND hRichStatus    = NULL;
-HWND hEditInput     = NULL;
-HWND hEditOutput    = NULL;
-
+HWND hStaticStatus = NULL;
+HWND hRichStatus = NULL;
+HWND hEditInput = NULL;
+HWND hEditOutput = NULL;
 WNDPROC origEditProc = NULL;
+
 HANDLE hSerial = INVALID_HANDLE_VALUE;
 HANDLE hReadThread = NULL;
 
 std::atomic<bool> g_bRunning(false);
-std::atomic<unsigned long long> g_txCount(0);
+std::atomic<unsigned long long> g_txCount(0);    // Счётчик переданных байт (данные + служебные поля)
+std::atomic<unsigned long long> g_frameCount(0); // Счётчик отправленных кадров
 bool g_portLocked = false;
-int g_lastSentPos = 0; // Граница уже отправленного текста в окне ввода
+int  g_unsentStartPos = 0;                       // Позиция начала неотправленного текста в поле ввода
 
 // Прототипы функций
 bool OpenAndConfigureSerial(int portNumber, BYTE stopBits);
 void CloseSerial();
 DWORD WINAPI SerialReadThread(LPVOID lpParam);
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+void CheckAndAutoSend(HWND hWnd);
 void AppendTextToOutput(const std::string& str);
 BYTE GetSelectedStopBits();
 std::vector<int> GetAvailableComPorts();
 void SendFramedMessage(const std::string& text);
-void ResetStatusWindow();
-void DisplayLastFrameStatus(const std::vector<uint8_t>& rawBody, size_t chunkLen, const std::vector<uint8_t>& stuffedBody, const std::vector<bool>& modifiedMask);
+void PrintStatusHeaderOnce();
+void AppendStatusFormatted(const wchar_t* prefix, const std::vector<uint8_t>& frameBody, size_t dataLen, const std::vector<bool>& modifiedMask);
 
 // ============================================================================
-// АЛГОРИТМ БИТ-СТАФФИНГА (ВАРИАНТ 3: ОПТИМИЗИРОВАННЫЙ)
+// БИТ-СТАФФИНГ ДЛЯ ЗАГОЛОВКА "450501-3" (63 БИТА)
 // ============================================================================
+const bool g_pattern63[63] = {
+    // '4' (0x34) = 00110100b
+    0, 0, 1, 1, 0, 1, 0, 0,
+    // '5' (0x35) = 00110101b
+    0, 0, 1, 1, 0, 1, 0, 1,
+    // '0' (0x30) = 00110000b
+    0, 0, 1, 1, 0, 0, 0, 0,
+    // '5' (0x35) = 00110101b
+    0, 0, 1, 1, 0, 1, 0, 1,
+    // '0' (0x30) = 00110000b
+    0, 0, 1, 1, 0, 0, 0, 0,
+    // '1' (0x31) = 00110001b
+    0, 0, 1, 1, 0, 0, 0, 1,
+    // '-' (0x2D) = 00101101b
+    0, 0, 1, 0, 1, 1, 0, 1,
+    // '3' (0x33, первые 7 бит) = 0011001b (8-й бит равен 1)
+    0, 0, 1, 1, 0, 0, 1
+};
+
 void BitStuff(const std::vector<uint8_t>& inData, std::vector<uint8_t>& outData, std::vector<bool>& modifiedBytes) {
     outData.clear();
     modifiedBytes.clear();
@@ -96,26 +121,33 @@ void BitStuff(const std::vector<uint8_t>& inData, std::vector<uint8_t>& outData,
     std::vector<bool> outBits;
     std::vector<bool> bitModifiedMask;
 
-    // Префикс первого символа флага '4' (0x34: 00110100b)
-    const bool pattern[6] = { 0, 0, 1, 1, 0, 1 };
-    int matchCount = 0;
-
-    for (size_t i = 0; i < inBits.size(); ++i) {
-        bool bit = inBits[i];
-        outBits.push_back(bit);
-        bitModifiedMask.push_back(false);
-
-        if (bit == pattern[matchCount]) {
-            matchCount++;
-            if (matchCount == 6) {
-                // Вставка инверсного бита '1'
-                outBits.push_back(true);
-                bitModifiedMask.push_back(true);
-                matchCount = 0;
+    size_t i = 0;
+    while (i < inBits.size()) {
+        bool match = false;
+        if (i + 63 <= inBits.size()) {
+            match = true;
+            for (int k = 0; k < 63; ++k) {
+                if (inBits[i + k] != g_pattern63[k]) {
+                    match = false;
+                    break;
+                }
             }
         }
+
+        if (match) {
+            for (int k = 0; k < 63; ++k) {
+                outBits.push_back(inBits[i + k]);
+                bitModifiedMask.push_back(false);
+            }
+            // Вставка бита '0' разрушает 64-й бит '1' символа '3'
+            outBits.push_back(false);
+            bitModifiedMask.push_back(true);
+            i += 63;
+        }
         else {
-            matchCount = (bit == pattern[0]) ? 1 : 0;
+            outBits.push_back(inBits[i]);
+            bitModifiedMask.push_back(false);
+            i++;
         }
     }
 
@@ -124,14 +156,14 @@ void BitStuff(const std::vector<uint8_t>& inData, std::vector<uint8_t>& outData,
         bitModifiedMask.push_back(false);
     }
 
-    for (size_t i = 0; i < outBits.size(); i += 8) {
+    for (size_t byteIdx = 0; byteIdx < outBits.size(); byteIdx += 8) {
         uint8_t b = 0;
         bool byteMod = false;
         for (int bitIdx = 0; bitIdx < 8; ++bitIdx) {
-            if (outBits[i + bitIdx]) {
+            if (outBits[byteIdx + bitIdx]) {
                 b |= (1 << (7 - bitIdx));
             }
-            if (bitModifiedMask[i + bitIdx]) {
+            if (bitModifiedMask[byteIdx + bitIdx]) {
                 byteMod = true;
             }
         }
@@ -143,40 +175,39 @@ void BitStuff(const std::vector<uint8_t>& inData, std::vector<uint8_t>& outData,
 std::vector<uint8_t> BitDestuff(const std::vector<uint8_t>& inData) {
     std::vector<bool> inBits;
     for (uint8_t b : inData) {
-        for (int i = 7; i >= 0; --i) {
-            inBits.push_back((b >> i) & 1);
-        }
+        for (int i = 7; i >= 0; --i) inBits.push_back((b >> i) & 1);
     }
 
     std::vector<bool> outBits;
-    const bool pattern[6] = { 0, 0, 1, 1, 0, 1 };
-    int matchCount = 0;
-
-    for (size_t i = 0; i < inBits.size(); ++i) {
-        bool bit = inBits[i];
-        outBits.push_back(bit);
-
-        if (bit == pattern[matchCount]) {
-            matchCount++;
-            if (matchCount == 6) {
-                if (i + 1 < inBits.size()) {
-                    i++; // Пропуск стаффинг-бита
+    size_t i = 0;
+    while (i < inBits.size()) {
+        bool match = false;
+        if (i + 63 <= inBits.size()) {
+            match = true;
+            for (int k = 0; k < 63; ++k) {
+                if (inBits[i + k] != g_pattern63[k]) {
+                    match = false;
+                    break;
                 }
-                matchCount = 0;
             }
         }
+
+        if (match) {
+            for (int k = 0; k < 63; ++k) outBits.push_back(inBits[i + k]);
+            i += 63;
+            if (i < inBits.size()) i++; // Пропуск стаффинг-бита
+        }
         else {
-            matchCount = (bit == pattern[0]) ? 1 : 0;
+            outBits.push_back(inBits[i]);
+            i++;
         }
     }
 
     std::vector<uint8_t> outBytes;
-    for (size_t i = 0; i + 8 <= outBits.size(); i += 8) {
+    for (size_t byteIdx = 0; byteIdx + 8 <= outBits.size(); byteIdx += 8) {
         uint8_t b = 0;
         for (int bitIdx = 0; bitIdx < 8; ++bitIdx) {
-            if (outBits[i + bitIdx]) {
-                b |= (1 << (7 - bitIdx));
-            }
+            if (outBits[byteIdx + bitIdx]) b |= (1 << (7 - bitIdx));
         }
         outBytes.push_back(b);
     }
@@ -216,12 +247,10 @@ std::vector<int> GetAvailableComPorts() {
                     catch (...) {}
                 }
             }
-            nameLen = 256;
-            dataSize = 256;
+            nameLen = 256; dataSize = 256;
         }
         RegCloseKey(hKey);
     }
-
     std::sort(ports.begin(), ports.end());
     return ports;
 }
@@ -233,11 +262,7 @@ bool OpenAndConfigureSerial(int portNumber, BYTE stopBits) {
     CloseSerial();
 
     std::wstring portName = L"\\\\.\\COM" + std::to_wstring(portNumber);
-    hSerial = CreateFileW(
-        portName.c_str(),
-        GENERIC_READ | GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING, 0, NULL
-    );
+    hSerial = CreateFileW(portName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
 
     if (hSerial == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
@@ -255,7 +280,6 @@ bool OpenAndConfigureSerial(int portNumber, BYTE stopBits) {
     dcb.DCBlength = sizeof(DCB);
     if (!GetCommState(hSerial, &dcb)) {
         CloseSerial();
-        MessageBoxW(hWndMain, L"Не удалось получить параметры DCB!", L"Ошибка", MB_ICONERROR | MB_OK);
         return false;
     }
 
@@ -275,7 +299,6 @@ bool OpenAndConfigureSerial(int portNumber, BYTE stopBits) {
 
     if (!SetCommState(hSerial, &dcb)) {
         CloseSerial();
-        MessageBoxW(hWndMain, L"Ошибка SetCommState!", L"Ошибка", MB_ICONERROR | MB_OK);
         return false;
     }
 
@@ -290,7 +313,6 @@ bool OpenAndConfigureSerial(int portNumber, BYTE stopBits) {
     PurgeComm(hSerial, PURGE_TXCLEAR | PURGE_RXCLEAR);
 
     g_bRunning = true;
-    g_lastSentPos = 0; // Сброс границы отправки при новом подключении
     hReadThread = CreateThread(NULL, 0, SerialReadThread, NULL, 0, NULL);
 
     if (!g_portLocked) {
@@ -313,6 +335,7 @@ void CloseSerial() {
     }
 }
 
+// Приём входящих пакетов
 DWORD WINAPI SerialReadThread(LPVOID lpParam) {
     std::vector<uint8_t> rxBuffer;
     char tempBuf[128];
@@ -346,18 +369,19 @@ DWORD WINAPI SerialReadThread(LPVOID lpParam) {
 
                 uint16_t bodyLen = (uint8_t)rxBuffer[FRAME_FLAG_LEN] | ((uint8_t)rxBuffer[FRAME_FLAG_LEN + 1] << 8);
                 size_t totalExpected = FRAME_FLAG_LEN + 2 + bodyLen;
-
                 if (rxBuffer.size() < totalExpected) break;
 
                 std::vector<uint8_t> stuffedBody(rxBuffer.begin() + FRAME_FLAG_LEN + 2, rxBuffer.begin() + totalExpected);
                 rxBuffer.erase(rxBuffer.begin(), rxBuffer.begin() + totalExpected);
 
+                // Дестаффинг
                 std::vector<uint8_t> rawBody = BitDestuff(stuffedBody);
 
-                if (rawBody.size() >= 3 + 2 + 1 + RESERVED_BYTES_LEN) {
-                    uint16_t dataLen = rawBody[3] | (rawBody[4] << 8);
-                    if (rawBody.size() >= 5 + dataLen) {
-                        std::string receivedText((char*)&rawBody[5], dataLen);
+                // Структура тела: [Addr:1] [Type:1] [DataLen:2] [Data:N] [FCS:1] [Reserved:10]
+                if (rawBody.size() >= 4) {
+                    uint16_t dataLen = rawBody[2] | (rawBody[3] << 8);
+                    if (dataLen <= MAX_PAYLOAD_SIZE && rawBody.size() >= 4 + dataLen) {
+                        std::string receivedText((char*)&rawBody[4], dataLen);
                         AppendTextToOutput(receivedText);
                     }
                 }
@@ -384,13 +408,11 @@ void AppendTextToOutput(const std::string& str) {
 
 BYTE GetSelectedStopBits() {
     int idx = (int)SendMessageW(hComboStopBits, CB_GETCURSEL, 0, 0);
-    if (idx == 1) return ONESTOPBIT;
-    if (idx == 2) return TWOSTOPBITS;
-    return 0xFF; // Не выбрано
+    return (idx == 1) ? TWOSTOPBITS : ONESTOPBIT;
 }
 
 // ============================================================================
-// ВЫВОД В ОКНО СОСТОЯНИЯ (RICH EDIT)
+// ВЫВОД В ОКНО СОСТОЯНИЯ (RICHEDIT)
 // ============================================================================
 void AppendFormattedHexByte(uint8_t b, bool isModified, bool addComma) {
     CHARFORMAT2W cf;
@@ -424,9 +446,7 @@ void AppendFieldSeparator() {
     SendMessageW(hRichStatus, EM_REPLACESEL, FALSE, (LPARAM)L" ");
 }
 
-void ResetStatusWindow() {
-    SetWindowTextW(hRichStatus, L"");
-
+void PrintStatusHeaderOnce() {
     CHARFORMAT2W cf;
     ZeroMemory(&cf, sizeof(cf));
     cf.cbSize = sizeof(cf);
@@ -434,9 +454,10 @@ void ResetStatusWindow() {
     cf.dwEffects = CFE_BOLD;
     cf.crTextColor = RGB(10, 60, 160);
 
-    std::wstring header = L"Поля кадра: [ФЛАГ] [ИСТОЧНИК] [НАЗНАЧЕНИЕ] [ТИП] [ДАННЫЕ] [FCS]\r\n"
-        L"-----------------------------------------------------------------------------------------\r\n";
-    SendMessageW(hRichStatus, EM_SETSEL, 0, -1);
+    // Компактный заголовок полей кадра
+    std::wstring header = L"Поля: [Заголовок] [Адрес] [Тип] [Данные] [FCS]\r\n"
+        L"-------------------------------------------------------------------------\r\n";
+    SendMessageW(hRichStatus, EM_SETSEL, 0, 0);
     SendMessageW(hRichStatus, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
     SendMessageW(hRichStatus, EM_REPLACESEL, FALSE, (LPARAM)header.c_str());
 }
@@ -454,32 +475,27 @@ void AppendStatusFormatted(const wchar_t* prefix, const std::vector<uint8_t>& fr
     SendMessageW(hRichStatus, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
     SendMessageW(hRichStatus, EM_REPLACESEL, FALSE, (LPARAM)prefix);
 
-    // 1. Поле Флага (8 байт: FRAME_FLAG_STR), разделение запятыми
-    for (size_t i = 0; i < FRAME_FLAG_LEN; ++i) {
-        AppendFormattedHexByte((uint8_t)FRAME_FLAG_STR[i], false, (i + 1 < FRAME_FLAG_LEN));
+    // 1. ФЛАГ 1: Начало кадра (8 байт: "450501-3")[cite: 1, 2]
+    const uint8_t flagBytes[] = { '4', '5', '0', '5', '0', '1', '-', '3' };
+    for (int i = 0; i < 8; ++i) {
+        AppendFormattedHexByte(flagBytes[i], false, (i < 7));
     }
     AppendFieldSeparator();
 
-    // 2. Служебное поле 1: Адрес источника (1 байт)
-    uint8_t src = (frameBody.size() > 0) ? frameBody[0] : 0;
-    bool modSrc = (modifiedMask.size() > 0) ? modifiedMask[0] : false;
-    AppendFormattedHexByte(src, modSrc, false);
+    // 2. ФЛАГ 2: Адрес станции (Addr)
+    uint8_t addr = (frameBody.size() > 0) ? frameBody[0] : 0;
+    bool modAddr = (modifiedMask.size() > 0) ? modifiedMask[0] : false;
+    AppendFormattedHexByte(addr, modAddr, false);
     AppendFieldSeparator();
 
-    // 3. Служебное поле 2: Адрес назначения (1 байт)
-    uint8_t dst = (frameBody.size() > 1) ? frameBody[1] : 0;
-    bool modDst = (modifiedMask.size() > 1) ? modifiedMask[1] : false;
-    AppendFormattedHexByte(dst, modDst, false);
-    AppendFieldSeparator();
-
-    // 4. Служебное поле 3: Тип кадра (1 байт)
-    uint8_t type = (frameBody.size() > 2) ? frameBody[2] : 0;
-    bool modType = (modifiedMask.size() > 2) ? modifiedMask[2] : false;
+    // 3. ФЛАГ 3: Тип кадра (PacketType)
+    uint8_t type = (frameBody.size() > 1) ? frameBody[1] : 0;
+    bool modType = (modifiedMask.size() > 1) ? modifiedMask[1] : false;
     AppendFormattedHexByte(type, modType, false);
     AppendFieldSeparator();
 
-    // 5. Поле данных: каждый байт отделяется запятой
-    size_t dataOffset = 5;
+    // 4. Поле данных (значения через запятую, модифицированные байты подчёркиваются)
+    size_t dataOffset = 4; // Addr(1) + Type(1) + DataLen(2)
     for (size_t i = 0; i < dataLen; ++i) {
         size_t idx = dataOffset + i;
         if (idx < frameBody.size()) {
@@ -490,30 +506,26 @@ void AppendStatusFormatted(const wchar_t* prefix, const std::vector<uint8_t>& fr
     }
     AppendFieldSeparator();
 
-    // 6. Служебное поле 4: Контрольная сумма FCS (1 байт)
-    size_t fcsIdx = dataOffset + dataLen;
+    // 5. Контрольная сумма FCS (перед 10 байтами резерва)[cite: 1]
+    size_t fcsIdx = 0;
+    if (frameBody.size() > RESERVED_BYTES_LEN) {
+        fcsIdx = frameBody.size() - RESERVED_BYTES_LEN - 1;
+    }
     uint8_t fcs = (fcsIdx < frameBody.size()) ? frameBody[fcsIdx] : 0;
     bool modFcs = (fcsIdx < modifiedMask.size()) ? modifiedMask[fcsIdx] : false;
     AppendFormattedHexByte(fcs, modFcs, false);
 
-    // 10 зарезервированных байтов по заданию НЕ выводятся
+    // 10 байт резерва в конце не выводятся[cite: 1, 2]
     SendMessageW(hRichStatus, EM_REPLACESEL, FALSE, (LPARAM)L"\r\n");
-    SendMessageW(hRichStatus, EM_SCROLLCARET, 0, 0);
-}
-
-void DisplayLastFrameStatus(const std::vector<uint8_t>& rawBody, size_t chunkLen, const std::vector<uint8_t>& stuffedBody, const std::vector<bool>& modifiedMask) {
-    ResetStatusWindow(); // Перезаписываем статус, чтобы отображался СТРОГО ПОСЛЕДНИЙ переданный кадр
-    std::vector<bool> noModMask(rawBody.size(), false);
-    AppendStatusFormatted(L"До стаффинга:    ", rawBody, chunkLen, noModMask);
-    AppendStatusFormatted(L"После стаффинга: ", stuffedBody, chunkLen, modifiedMask);
+    SendMessageW(hRichStatus, WM_HSCROLL, SB_LEFT, 0);
 }
 
 // ============================================================================
-// ПЕРЕДАЧА КАДРОВ
+// ПАКЕТНАЯ ПЕРЕДАЧА (3 ФЛАГА + ДАННЫЕ + FCS)
 // ============================================================================
 void SendFramedMessage(const std::string& text) {
     if (hSerial == INVALID_HANDLE_VALUE) {
-        MessageBoxW(hWndMain, L"Сначала выберите параметры COM-порта в окне управления!", L"Предупреждение", MB_ICONWARNING | MB_OK);
+        MessageBoxW(hWndMain, L"Сначала выберите COM-порт в окне управления!", L"Предупреждение", MB_ICONWARNING | MB_OK);
         return;
     }
 
@@ -524,20 +536,21 @@ void SendFramedMessage(const std::string& text) {
         size_t remaining = totalLen - offset;
         size_t chunkLen = (remaining < (size_t)MAX_PAYLOAD_SIZE) ? remaining : (size_t)MAX_PAYLOAD_SIZE;
 
+        // Тело кадра: [Флаг 2: Addr (1)] + [Флаг 3: Type (1)] + [DataLen (2)] + [Данные] + [FCS (1)] + [Резерв (10)]
         std::vector<uint8_t> rawBody;
-        rawBody.push_back(0x00); // SrcAddr = 0
-        rawBody.push_back(0x00); // DestAddr = 0
-        rawBody.push_back(0x00); // PacketType = 0
+        rawBody.push_back(0x00);                              // Флаг 2: Addr = 00h
+        rawBody.push_back(0x00);                              // Флаг 3: PacketType = 00h
         rawBody.push_back((uint8_t)(chunkLen & 0xFF));        // Длина данных (мл)
         rawBody.push_back((uint8_t)((chunkLen >> 8) & 0xFF)); // Длина данных (ст)
 
+        // Полезные данные
         for (size_t i = 0; i < chunkLen; ++i) {
             rawBody.push_back((uint8_t)text[offset + i]);
         }
 
-        rawBody.push_back(0x00); // FCS = 0
+        rawBody.push_back(0x00); // FCS = 00h[cite: 1]
 
-        // 10 зарезервированных байтов в конце кадра
+        // 10 зарезервированных байтов[cite: 1]
         for (int i = 0; i < RESERVED_BYTES_LEN; ++i) {
             rawBody.push_back(0x00);
         }
@@ -547,102 +560,122 @@ void SendFramedMessage(const std::string& text) {
         std::vector<bool> modifiedMask;
         BitStuff(rawBody, stuffedBody, modifiedMask);
 
-        // Отображение только последнего переданного кадра
-        DisplayLastFrameStatus(rawBody, chunkLen, stuffedBody, modifiedMask);
+        // Очистка и вывод в RichEdit
+        SetWindowTextW(hRichStatus, L"");
+        PrintStatusHeaderOnce();
 
-        // Отправка кадра в порт
-        DWORD written = 0;
-        WriteFile(hSerial, FRAME_FLAG_STR, FRAME_FLAG_LEN, &written, NULL);
-        g_txCount += written;
+        std::vector<bool> noModMask(rawBody.size(), false);
+        AppendStatusFormatted(L"До стаффинга:    ", rawBody, chunkLen, noModMask);
+        AppendStatusFormatted(L"После стаффинга: ", stuffedBody, chunkLen, modifiedMask);
 
+        // Формирование пакета: Флаг 1 (8 байт) + Длина тела (2 байта) + Закодированное тело
+        std::vector<uint8_t> fullPacket;
+        fullPacket.insert(fullPacket.end(), FRAME_FLAG_STR, FRAME_FLAG_STR + FRAME_FLAG_LEN);
         uint16_t encLen = (uint16_t)stuffedBody.size();
-        WriteFile(hSerial, &encLen, 2, &written, NULL);
-        g_txCount += written;
+        fullPacket.push_back((uint8_t)(encLen & 0xFF));
+        fullPacket.push_back((uint8_t)((encLen >> 8) & 0xFF));
+        fullPacket.insert(fullPacket.end(), stuffedBody.begin(), stuffedBody.end());
 
-        WriteFile(hSerial, stuffedBody.data(), (DWORD)stuffedBody.size(), &written, NULL);
-        g_txCount += written;
+        // Отправка единым блоком: точный учёт переданных байт
+        DWORD written = 0;
+        if (WriteFile(hSerial, fullPacket.data(), (DWORD)fullPacket.size(), &written, NULL)) {
+            g_txCount += written;
+        }
+
+        g_frameCount++;
 
         offset += chunkLen;
         if (totalLen == 0) break;
     }
 }
 
-// ============================================================================
-// ОКНО ВВОДА: РЕЖИМ ТЕРМИНАЛА (БЕЗ УДАЛЕНИЯ ИСТОРИИ ВВОДА)
-// ============================================================================
+// Проверка накопившихся байтов: автоотправка строго при достижении 277 полезных байт (300 байт кадра)
+void CheckAndAutoSend(HWND hWnd) {
+    if (hSerial == INVALID_HANDLE_VALUE) return;
+
+    int totalLen = GetWindowTextLengthW(hWnd);
+    if (totalLen < g_unsentStartPos) {
+        g_unsentStartPos = totalLen;
+        return;
+    }
+
+    int unsentWLen = totalLen - g_unsentStartPos;
+    if (unsentWLen <= 0) return;
+
+    std::vector<wchar_t> wbuf(totalLen + 1, 0);
+    GetWindowTextW(hWnd, wbuf.data(), totalLen + 1);
+
+    const wchar_t* pUnsent = wbuf.data() + g_unsentStartPos;
+
+    // Конвертируем только неотправленную часть в байты ANSI
+    int bLen = WideCharToMultiByte(CP_ACP, 0, pUnsent, unsentWLen, NULL, 0, NULL, NULL);
+    if (bLen <= 0) return;
+
+    std::string unsentStr(bLen, 0);
+    WideCharToMultiByte(CP_ACP, 0, pUnsent, unsentWLen, &unsentStr[0], bLen, NULL, NULL);
+
+    // Автоотправка порциями по 277 байт (дающих ровно 300 байт кадра)
+    while (unsentStr.length() >= AUTO_SEND_LIMIT) {
+        std::string chunk = unsentStr.substr(0, AUTO_SEND_LIMIT);
+        SendFramedMessage(chunk);
+
+        int chunkWLen = MultiByteToWideChar(CP_ACP, 0, chunk.c_str(), (int)chunk.length(), NULL, 0);
+        g_unsentStartPos += chunkWLen;
+
+        unsentStr = unsentStr.substr(AUTO_SEND_LIMIT);
+
+        // Вставляем перевод строки после автоотправленного кадра
+        SendMessageW(hWnd, EM_SETSEL, (WPARAM)g_unsentStartPos, (LPARAM)g_unsentStartPos);
+        SendMessageW(hWnd, EM_REPLACESEL, FALSE, (LPARAM)L"\r\n");
+        g_unsentStartPos += 2;
+    }
+}
+
+// Перехват ввода: Enter для ручной отправки, либо автоотправка при 300 байтах кадра
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    // 1. Блокируем стирание (Backspace/Delete) уже отправленного текста
-    if (uMsg == WM_KEYDOWN) {
-        if (wParam == VK_BACK || wParam == VK_DELETE) {
-            DWORD start = 0, end = 0;
-            SendMessageW(hWnd, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-            if (start <= (DWORD)g_lastSentPos || end <= (DWORD)g_lastSentPos) {
-                return 0; // Запрещено стирать отправленное
-            }
-        }
-    }
-
-    // 2. Блокируем вырезание (Ctrl+X) уже отправленного текста
-    if (uMsg == WM_CUT || uMsg == WM_CLEAR) {
-        DWORD start = 0, end = 0;
-        SendMessageW(hWnd, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-        if (start < (DWORD)g_lastSentPos) {
-            return 0;
-        }
-    }
-
-    // 3. Обработка ввода и нажатия клавиши Enter
-    if (uMsg == WM_CHAR) {
-        // Если порт ещё не открыт, не разрешаем печатать
+    // 1. Ручная отправка по клавише Enter
+    if (uMsg == WM_CHAR && wParam == VK_RETURN) {
         if (hSerial == INVALID_HANDLE_VALUE) {
+            MessageBoxW(hWndMain, L"Сначала выберите COM-порт в окне управления!", L"Предупреждение", MB_ICONWARNING | MB_OK);
             return 0;
         }
 
-        // Если каретка оказалась в области старого текста, переносим её в конец
-        DWORD start = 0, end = 0;
-        SendMessageW(hWnd, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-        if (start < (DWORD)g_lastSentPos) {
-            int totalLen = GetWindowTextLengthW(hWnd);
-            SendMessageW(hWnd, EM_SETSEL, (WPARAM)totalLen, (LPARAM)totalLen);
-        }
+        int totalLen = GetWindowTextLengthW(hWnd);
+        if (totalLen >= g_unsentStartPos) {
+            int unsentWLen = totalLen - g_unsentStartPos;
+            if (unsentWLen > 0) {
+                std::vector<wchar_t> wbuf(totalLen + 1, 0);
+                GetWindowTextW(hWnd, wbuf.data(), totalLen + 1);
 
-        // Отправка по Enter
-        if (wParam == VK_RETURN) {
-            // Вставляем перевод строки \r\n в окне ввода
-            LRESULT res = CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
-
-            int totalLen = GetWindowTextLengthW(hWnd);
-            if (totalLen > g_lastSentPos) {
-                std::wstring fullText(totalLen + 1, 0);
-                GetWindowTextW(hWnd, &fullText[0], totalLen + 1);
-                fullText.resize(totalLen);
-
-                // Забираем ровно ту строку, которую ввели
-                std::wstring newText = fullText.substr(g_lastSentPos);
-
-                int bLen = WideCharToMultiByte(CP_ACP, 0, newText.c_str(), -1, NULL, 0, NULL, NULL);
-                if (bLen > 1) {
-                    std::string sendStr(bLen, 0);
-                    WideCharToMultiByte(CP_ACP, 0, newText.c_str(), -1, &sendStr[0], bLen, NULL, NULL);
-                    sendStr.pop_back(); // Убираем null-терминатор
-
-                    SendFramedMessage(sendStr);
+                const wchar_t* pUnsent = wbuf.data() + g_unsentStartPos;
+                int bLen = WideCharToMultiByte(CP_ACP, 0, pUnsent, unsentWLen, NULL, 0, NULL, NULL);
+                if (bLen > 0) {
+                    std::string text(bLen, 0);
+                    WideCharToMultiByte(CP_ACP, 0, pUnsent, unsentWLen, &text[0], bLen, NULL, NULL);
+                    text += "\r\n";
+                    SendFramedMessage(text);
                 }
-
-                // Сдвигаем границу отправки вперед
-                g_lastSentPos = totalLen;
             }
-
-            SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
-            return res;
         }
+
+        LRESULT res = CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
+        g_unsentStartPos = GetWindowTextLengthW(hWnd);
+        return res;
     }
 
-    return CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
+    // Пропускаем символ в стандартный обработчик EDIT
+    LRESULT res = CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
+
+    // 2. Автоотправка: срабатывает при наборе и вставке текста
+    if (uMsg == WM_CHAR || uMsg == WM_PASTE || (uMsg == WM_KEYDOWN && wParam == 'V' && (GetKeyState(VK_CONTROL) & 0x8000))) {
+        CheckAndAutoSend(hWnd);
+    }
+
+    return res;
 }
 
 // ============================================================================
-// ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ (СЕТКА 2х2)
+// ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ (СЕТКА 2х2 БЕЗ ВКЛАДОК)
 // ============================================================================
 LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -650,9 +683,8 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
         // 1. Окно управления
-        hGroupControl = CreateWindowW(L"BUTTON", L"Окно управления (Параметры COM-порта)",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            0, 0, 0, 0, hWnd, NULL, NULL, NULL);
+        hGroupControl = CreateWindowW(L"BUTTON", L"1. Окно управления (Параметры COM-порта)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hWnd, NULL, NULL, NULL);
         SendMessageW(hGroupControl, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         hComboPort = CreateWindowW(L"COMBOBOX", NULL,
@@ -662,13 +694,14 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
         std::vector<int> ports = GetAvailableComPorts();
         if (ports.empty()) {
-            SendMessageW(hComboPort, CB_ADDSTRING, 0, (LPARAM)L"COM-порты не обнаружены");
-            SendMessageW(hComboPort, CB_SETITEMDATA, 0, (LPARAM)0);
+            SendMessageW(hComboPort, CB_ADDSTRING, 0, (LPARAM)L"COM-порты не найдены");
+            SendMessageW(hComboPort, CB_SETITEMDATA, 0, 0);
             SendMessageW(hComboPort, CB_SETCURSEL, 0, 0);
+            EnableWindow(hComboPort, FALSE);
         }
         else {
             SendMessageW(hComboPort, CB_ADDSTRING, 0, (LPARAM)L"-- Выберите COM-порт --");
-            SendMessageW(hComboPort, CB_SETITEMDATA, 0, (LPARAM)0);
+            SendMessageW(hComboPort, CB_SETITEMDATA, 0, 0);
             for (int p : ports) {
                 std::wstring name = L"COM-порт: COM" + std::to_wstring(p);
                 int idx = (int)SendMessageW(hComboPort, CB_ADDSTRING, 0, (LPARAM)name.c_str());
@@ -681,30 +714,30 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             0, 0, 0, 0, hWnd, (HMENU)IDC_COMBO_STOPBITS, NULL, NULL);
         SendMessageW(hComboStopBits, WM_SETFONT, (WPARAM)hFont, TRUE);
-        SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"-- Выберите количество стоп-битов --");
         SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"Стоп-биты: 1 стоп-бит");
         SendMessageW(hComboStopBits, CB_ADDSTRING, 0, (LPARAM)L"Стоп-биты: 2 стоп-бита");
         SendMessageW(hComboStopBits, CB_SETCURSEL, 0, 0);
 
-        // 2. Окно состояния (Кадры)
-        hGroupStatus = CreateWindowW(L"BUTTON", L"Окно состояния (Кадры)",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            0, 0, 0, 0, hWnd, NULL, NULL, NULL);
+        // 2. Окно состояния
+        hGroupStatus = CreateWindowW(L"BUTTON", L"2. Окно состояния (Кадры и статистика)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hWnd, NULL, NULL, NULL);
         SendMessageW(hGroupStatus, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        hRichStatus = CreateWindowExW(WS_EX_CLIENTEDGE, L"RichEdit20W", L"",
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-            0, 0, 0, 0, hWnd, (HMENU)IDC_RICH_STATUS, NULL, NULL);
-        SendMessageW(hRichStatus, WM_SETFONT, (WPARAM)hFont, TRUE);
-        SendMessageW(hRichStatus, EM_SETBKGNDCOLOR, 0, (LPARAM)RGB(253, 253, 253));
+        hStaticStatus = CreateWindowW(L"STATIC", L"Статус: Выберите COM-порт в окне управления...",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
+        SendMessageW(hStaticStatus, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Вывод заголовка структуры полей
-        ResetStatusWindow();
+        hRichStatus = CreateWindowExW(WS_EX_CLIENTEDGE, L"RichEdit20W", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
+            0, 0, 0, 0, hWnd, (HMENU)IDC_RICH_STATUS, NULL, NULL);
+        SendMessageW(hRichStatus, EM_SETTARGETDEVICE, 0, 0);
+        SendMessageW(hRichStatus, EM_SETBKGNDCOLOR, 0, (LPARAM)RGB(252, 252, 252));
+
+        SetTimer(hWnd, IDT_STATUS_TIMER, 200, NULL);
 
         // 3. Окно ввода сообщений
-        hGroupInput = CreateWindowW(L"BUTTON", L"Окно ввода сообщений",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            0, 0, 0, 0, hWnd, NULL, NULL, NULL);
+        hGroupInput = CreateWindowW(L"BUTTON", L"3. Окно ввода сообщений (Enter или автоотправка при 300 байтах кадра)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hWnd, NULL, NULL, NULL);
         SendMessageW(hGroupInput, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         hEditInput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
@@ -714,15 +747,16 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         origEditProc = (WNDPROC)SetWindowLongPtrW(hEditInput, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
         // 4. Окно вывода сообщений
-        hGroupOutput = CreateWindowW(L"BUTTON", L"Окно вывода сообщений",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            0, 0, 0, 0, hWnd, NULL, NULL, NULL);
+        hGroupOutput = CreateWindowW(L"BUTTON", L"4. Окно вывода сообщений (Принятые данные)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hWnd, NULL, NULL, NULL);
         SendMessageW(hGroupOutput, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         hEditOutput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
             0, 0, 0, 0, hWnd, (HMENU)IDC_EDIT_OUTPUT, NULL, NULL);
         SendMessageW(hEditOutput, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        SetFocus(hEditInput);
         break;
     }
 
@@ -731,28 +765,25 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         int totalH = HIWORD(lParam);
         int margin = 12;
         int gap = 12;
-        int topH = 140; // Высота верхнего ряда
+        int topH = 175; // Увеличенная высота верхней строки блоков для свободного отображения RichEdit
         int botH = totalH - topH - (margin * 2) - gap;
         int colW = (totalW - (margin * 2) - gap) / 2;
 
-        if (colW > 120 && botH > 60) {
-            // Верхний левый блок: Управление
+        if (colW > 150 && botH > 60) {
             MoveWindow(hGroupControl, margin, margin, colW, topH, TRUE);
             int comboW = (colW - 36) / 2;
             MoveWindow(hComboPort, margin + 12, margin + 50, comboW, 250, TRUE);
             MoveWindow(hComboStopBits, margin + 24 + comboW, margin + 50, comboW, 250, TRUE);
 
-            // Верхний правый блок: Состояние (Кадры)
             MoveWindow(hGroupStatus, margin + colW + gap, margin, colW, topH, TRUE);
-            MoveWindow(hRichStatus, margin + colW + gap + 12, margin + 22, colW - 24, topH - 34, TRUE);
+            MoveWindow(hStaticStatus, margin + colW + gap + 15, margin + 22, colW - 30, 18, TRUE);
+            MoveWindow(hRichStatus, margin + colW + gap + 10, margin + 44, colW - 20, topH - 54, TRUE);
 
-            // Нижний левый блок: Ввод
             MoveWindow(hGroupInput, margin, margin + topH + gap, colW, botH, TRUE);
-            MoveWindow(hEditInput, margin + 12, margin + topH + gap + 25, colW - 24, botH - 38, TRUE);
+            MoveWindow(hEditInput, margin + 10, margin + topH + gap + 25, colW - 20, botH - 35, TRUE);
 
-            // Нижний правый блок: Вывод
             MoveWindow(hGroupOutput, margin + colW + gap, margin + topH + gap, colW, botH, TRUE);
-            MoveWindow(hEditOutput, margin + colW + gap + 12, margin + topH + gap + 25, colW - 24, botH - 38, TRUE);
+            MoveWindow(hEditOutput, margin + colW + gap + 10, margin + topH + gap + 25, colW - 20, botH - 35, TRUE);
         }
         break;
     }
@@ -761,33 +792,24 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         int wmId = LOWORD(wParam);
         int wmEvent = HIWORD(wParam);
 
-        // Выбор COM-порта
         if (wmId == IDC_COMBO_PORT && wmEvent == CBN_SELCHANGE) {
             int curSel = (int)SendMessageW(hComboPort, CB_GETCURSEL, 0, 0);
             if (curSel != CB_ERR && !g_portLocked) {
                 int portNumber = (int)SendMessageW(hComboPort, CB_GETITEMDATA, curSel, 0);
                 if (portNumber > 0) {
                     BYTE stopBits = GetSelectedStopBits();
-                    if (stopBits == 0xFF) {
-                        MessageBoxW(hWnd, L"Сначала выберите количество стоп-битов в окне управления!",
-                            L"Параметры COM-порта", MB_ICONINFORMATION | MB_OK);
-                        SendMessageW(hComboPort, CB_SETCURSEL, 0, 0);
-                        SetFocus(hComboStopBits);
-                        break;
-                    }
-
                     if (OpenAndConfigureSerial(portNumber, stopBits)) {
-                        ResetStatusWindow();
+                        SetWindowTextW(hRichStatus, L"");
+                        PrintStatusHeaderOnce();
                     }
                     SetFocus(hEditInput);
                 }
             }
         }
 
-        // Изменение стоп-битов
         if (wmId == IDC_COMBO_STOPBITS && wmEvent == CBN_SELCHANGE) {
             BYTE stopBits = GetSelectedStopBits();
-            if (stopBits != 0xFF && hSerial != INVALID_HANDLE_VALUE) {
+            if (hSerial != INVALID_HANDLE_VALUE) {
                 DCB dcb = { 0 };
                 dcb.DCBlength = sizeof(DCB);
                 if (GetCommState(hSerial, &dcb)) {
@@ -800,11 +822,29 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
 
+    case WM_TIMER: {
+        if (wParam == IDT_STATUS_TIMER) {
+            std::wstring statusText;
+            if (hSerial != INVALID_HANDLE_VALUE) {
+                statusText = L"Передано байт: " +
+                    std::to_wstring(g_txCount.load()) +
+                    L" | Кадров: " +
+                    std::to_wstring(g_frameCount.load());
+            }
+            else {
+                statusText = L"Выберите COM-порт в окне управления.";
+            }
+            SetWindowTextW(hStaticStatus, statusText.c_str());
+        }
+        break;
+    }
+
     case WM_SETFOCUS:
         SetFocus(hEditInput);
         break;
 
     case WM_DESTROY:
+        KillTimer(hWnd, IDT_STATUS_TIMER);
         CloseSerial();
         PostQuitMessage(0);
         break;
@@ -819,7 +859,6 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 // ТОЧКА ВХОДА WinMain
 // ============================================================================
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
-    // Обязательная загрузка DLL библиотеки RichEdit
     LoadLibraryW(L"riched20.dll");
 
     INITCOMMONCONTROLSEX icex;
@@ -827,7 +866,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     icex.dwICC = ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icex);
 
-    const wchar_t CLASS_NAME[] = L"OSKS_Main_Class";
+    const wchar_t CLASS_NAME[] = L"OSKS_Lab2_Var3_FinalFixedApp";
 
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = WndProcMain;
@@ -838,17 +877,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     RegisterClassW(&wc);
 
-    hWndMain = CreateWindowExW(0, CLASS_NAME,
+    hWndMain = CreateWindowExW(
+        0, CLASS_NAME,
         L"ОсКС — Лабораторная работа №2 (Пакетная передача данных, Вариант 3)",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 960, 600,
-        NULL, NULL, hInstance, NULL);
+        CW_USEDEFAULT, CW_USEDEFAULT, 980, 680,
+        NULL, NULL, hInstance, NULL
+    );
 
     if (!hWndMain) return 0;
 
     ShowWindow(hWndMain, nCmdShow);
     UpdateWindow(hWndMain);
-    SetFocus(hEditInput);
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
