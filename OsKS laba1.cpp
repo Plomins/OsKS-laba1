@@ -1,4 +1,4 @@
-#ifndef NOMINMAX
+﻿#ifndef NOMINMAX
 #define NOMINMAX
 #endif
 
@@ -643,23 +643,53 @@ void CheckAndAutoSend(HWND hWnd) {
     }
 }
 
-// Перехват ввода: Enter выполняет только перенос строки, отправка — автоматически
+// Окно ввода: поведение как в ЛР1 (стирать нельзя, до выбора порта печатать нельзя),
+// отправка кадра по-прежнему выполняется автоматически в CheckAndAutoSend
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    if (uMsg == WM_CHAR && wParam == VK_RETURN) {
-        CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
-        return 0; // Запрет отправки по Enter
-    }
-    if (uMsg == WM_KEYDOWN && wParam == VK_RETURN) {
-        return CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
-    }
+    switch (uMsg) {
 
-    LRESULT res = CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
+    // 1. Любое стирание запрещено
+    case WM_KEYDOWN:
+        if (wParam == VK_BACK || wParam == VK_DELETE) return 0;
+        break;
+    case WM_CUT:
+    case WM_CLEAR:
+    case WM_UNDO:
+    case EM_UNDO:
+        return 0;
 
-    if (uMsg == WM_CHAR || uMsg == WM_PASTE || (uMsg == WM_KEYDOWN && wParam == 'V' && (GetKeyState(VK_CONTROL) & 0x8000))) {
+    // 2. Вставка: только при открытом порте и всегда в конец текста
+    case WM_PASTE: {
+        if (hSerial == INVALID_HANDLE_VALUE) return 0;
+        int len = GetWindowTextLengthW(hWnd);
+        SendMessageW(hWnd, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+        LRESULT res = CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
         CheckAndAutoSend(hWnd);
+        return res;
     }
 
-    return res;
+    // 3. Ввод символов
+    case WM_CHAR: {
+        if (hSerial == INVALID_HANDLE_VALUE) return 0; // порт не выбран: печатать нельзя
+        if (wParam == VK_BACK) return 0;               // символ Backspace
+
+        // Печатаемый символ или Enter: каретка в конец, выделение схлопывается
+        if (wParam >= 32 || wParam == VK_RETURN) {
+            int len = GetWindowTextLengthW(hWnd);
+            SendMessageW(hWnd, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+        }
+
+        if (wParam == VK_RETURN) {
+            CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
+            return 0; // Enter только переносит строку, как было
+        }
+
+        LRESULT res = CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
+        CheckAndAutoSend(hWnd);
+        return res;
+    }
+    }
+    return CallWindowProc(origEditProc, hWnd, uMsg, wParam, lParam);
 }
 
 // ============================================================================
@@ -718,6 +748,7 @@ LRESULT CALLBACK WndProcMain(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         hRichStatus = CreateWindowExW(WS_EX_CLIENTEDGE, L"RichEdit20W", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
             0, 0, 0, 0, hWnd, (HMENU)IDC_RICH_STATUS, NULL, NULL);
+        SendMessageW(hRichStatus, WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessageW(hRichStatus, EM_SETTARGETDEVICE, 0, 0);
         SendMessageW(hRichStatus, EM_SETBKGNDCOLOR, 0, (LPARAM)RGB(252, 252, 252));
 
