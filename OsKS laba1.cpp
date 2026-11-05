@@ -593,7 +593,7 @@ void SendFramedMessage(const std::string& text) {
 
         // Полный кадр: Флаг (8 байт) + Закодированное тело (292 байта) = РОВНО 300 БАЙТ[cite: 1]
         std::vector<uint8_t> fullPacket;
-        fullPacket.insert(fullPacket.end(), 450501-3, 450501-3 +  8);
+        fullPacket.insert(fullPacket.end(), "450501-3", "450501-3" +  8);
         fullPacket.insert(fullPacket.end(), stuffedBody.begin(), stuffedBody.end());
 
         // Отправка в COM-порт
